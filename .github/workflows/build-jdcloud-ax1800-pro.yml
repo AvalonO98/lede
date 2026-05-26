@@ -1,4 +1,4 @@
-name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（最终稳定版）
+name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（终极稳定版）
 
 on:
   workflow_dispatch:
@@ -57,13 +57,12 @@ jobs:
           fi
           echo "✅ Lean源码克隆成功"
 
-      - name: 克隆iStore并删除冲突包（方案一，彻底解决冲突）
+      - name: 克隆iStore并删除冲突包
         working-directory: ./lede
         run: |
           rm -rf feeds/ feeds.conf
           mkdir -p feeds/
           
-          # 多源备用克隆iStore
           REPO_URLS=(
             "https://github.com/istoreos/istore.git"
             "https://github.com/linkease/istore.git"
@@ -103,14 +102,12 @@ jobs:
             exit 1
           fi
           
-          # 关键：删除与官方luci源冲突的包（物理删除）
+          # 物理删除冲突包，彻底解决多源同名问题
           echo "🧹 清理冲突包..."
           rm -rf feeds/istore/luci/applications/luci-app-passwall
           rm -rf feeds/istore/luci/applications/luci-app-passwall2
           rm -rf feeds/istore/luci/applications/luci-app-ssr-plus
-          # 若有其他冲突可继续添加
           
-          # 生成feeds.conf
           cat > feeds.conf << EOF
           src-git packages https://github.com/coolsnowwolf/packages
           src-git luci https://github.com/coolsnowwolf/luci
@@ -124,62 +121,76 @@ jobs:
         working-directory: ./lede
         run: |
           ./scripts/feeds update -a
-          ./scripts/feeds install -a   # 此时不会再报冲突
+          ./scripts/feeds install -a
           echo "✅ 所有feeds安装成功"
+
+      - name: 检测京东云亚瑟设备名称
+        working-directory: ./lede
+        id: detect_device
+        run: |
+          # 从源码中自动提取正确的设备定义名
+          DEVICE_NAME=$(grep -rPo 'define Device/\K(jdcloud[^ ]*)' target/linux/ipq60xx/image/ | head -1)
+          if [ -z "$DEVICE_NAME" ]; then
+            echo "❌ 未找到京东云设备定义，请检查源码"
+            grep -i jdcloud target/linux/ipq60xx/image/ || true
+            exit 1
+          fi
+          echo "🔧 检测到设备名称: $DEVICE_NAME"
+          echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_OUTPUT
 
       - name: 生成京东云AX1800 Pro配置
         working-directory: ./lede
         run: |
-          # 1. 写入设备核心配置（确保不被覆盖）
-          cat > .config << 'EOF'
-          CONFIG_TARGET_ipq60xx=y
-          CONFIG_TARGET_ipq60xx_generic=y
-          CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y
+          DEVICE_NAME="${{ steps.detect_device.outputs.DEVICE_NAME }}"
+          
+          # 1. 直接使用 make defconfig 根据设备名生成初始配置
+          #    需要将设备名转换为完整配置三行
+          TARGET_ARCH="ipq60xx"
+          TARGET_SUBTARGET="generic"
+          
+          cat > .config << EOF
+          CONFIG_TARGET_${TARGET_ARCH}=y
+          CONFIG_TARGET_${TARGET_ARCH}_${TARGET_SUBTARGET}=y
+          CONFIG_TARGET_${TARGET_ARCH}_${TARGET_SUBTARGET}_DEVICE_${DEVICE_NAME}=y
           EOF
           
-          # 2. 生成该设备的默认完整配置
+          # 2. 生成该设备的默认配置（自动补全该设备的所有默认包）
           make defconfig
           
-          # 3. 追加所需软件包（直接修改.config）
-          cat >> .config << 'EOF'
-          CONFIG_TARGET_ROOTFS_SQUASHFS=y
-          CONFIG_STRIP_KERNEL_EXPORTS=y
-          CONFIG_USE_MKLIBS=y
+          # 3. 使用 ./scripts/config 安全启用所需软件包
+          ./scripts/config -e CONFIG_TARGET_ROOTFS_SQUASHFS
+          ./scripts/config -e CONFIG_STRIP_KERNEL_EXPORTS
+          ./scripts/config -e CONFIG_USE_MKLIBS
           
-          CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-          CONFIG_PACKAGE_luci-theme-argon=y
+          ./scripts/config -e CONFIG_PACKAGE_luci
+          ./scripts/config -e CONFIG_PACKAGE_luci-i18n-base-zh-cn
+          ./scripts/config -e CONFIG_PACKAGE_luci-theme-argon
           
-          CONFIG_PACKAGE_luci-app-istore=y
-          CONFIG_PACKAGE_luci-app-istorex=y
-          CONFIG_PACKAGE_luci-app-quickstart=y
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-istore
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-istorex
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-quickstart
           
-          CONFIG_PACKAGE_kmod-qca-nss-drv=y
-          CONFIG_PACKAGE_kmod-qca-nss-drv-qdisc=y
-          CONFIG_PACKAGE_kmod-qca-nss-ecm=y
-          CONFIG_PACKAGE_luci-app-turboacc=y
+          ./scripts/config -e CONFIG_PACKAGE_kmod-qca-nss-drv
+          ./scripts/config -e CONFIG_PACKAGE_kmod-qca-nss-drv-qdisc
+          ./scripts/config -e CONFIG_PACKAGE_kmod-qca-nss-ecm
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-turboacc
           
-          CONFIG_PACKAGE_luci-app-upnp=y
-          CONFIG_PACKAGE_luci-app-ddns=y
-          CONFIG_PACKAGE_luci-app-ttyd=y
-          CONFIG_PACKAGE_luci-app-nlbwmon=y
-          CONFIG_PACKAGE_luci-app-arpbind=y
-          EOF
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-upnp
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-ddns
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-ttyd
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-nlbwmon
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-arpbind
           
-          # 4. 用 oldconfig 自动补全所有依赖（现在冲突已解决，应能顺利通过）
-          echo "🔄 补全配置依赖..."
-          if ! make oldconfig < /dev/null; then
-            echo "❌ make oldconfig 失败，尝试详细输出:"
-            make oldconfig V=s < /dev/null
-            exit 1
-          fi
+          # 4. 用 yes 自动回车补全所有依赖（完全非交互，不会卡住）
+          echo "🔄 正在补全配置依赖（非交互模式）..."
+          yes '' | make oldconfig
           
-          # 5. 验证设备配置是否还在
-          if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
-            echo "✅ 设备配置验证通过"
+          # 5. 验证设备配置是否被保留
+          if grep -q "CONFIG_TARGET_${TARGET_ARCH}_${TARGET_SUBTARGET}_DEVICE_${DEVICE_NAME}=y" .config; then
+            echo "✅ 设备配置验证通过 (${DEVICE_NAME})"
           else
-            echo "❌ 设备配置丢失，请检查源码支持的型号"
-            grep -i jdcloud .config || true
+            echo "❌ 设备配置丢失，当前配置文件中的设备相关项:"
+            grep -E 'CONFIG_TARGET_.*DEVICE' .config || echo "无任何设备选项"
             exit 1
           fi
 
@@ -194,7 +205,7 @@ jobs:
         run: |
           make -j2 V=s
           
-          if ls bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs*.bin 1> /dev/null 2>&1; then
+          if ls bin/targets/ipq60xx/generic/*jdcloud*squashfs*.bin 1> /dev/null 2>&1; then
             echo "✅ 固件编译成功"
           else
             echo "❌ 固件编译失败"
@@ -206,8 +217,8 @@ jobs:
           mkdir -p output
           DATE=$(date +"%Y%m%d-%H%M")
           
-          cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-factory.bin output/LEDE-iStore-AX1800Pro-${DATE}_factory.bin
-          cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-sysupgrade.bin output/LEDE-iStore-AX1800Pro-${DATE}_sysupgrade.bin
+          cp lede/bin/targets/ipq60xx/generic/*jdcloud*squashfs-factory.bin output/LEDE-iStore-AX1800Pro-${DATE}_factory.bin
+          cp lede/bin/targets/ipq60xx/generic/*jdcloud*squashfs-sysupgrade.bin output/LEDE-iStore-AX1800Pro-${DATE}_sysupgrade.bin
           
           echo "✅ 编译完成！生成的固件："
           ls -lh output/
