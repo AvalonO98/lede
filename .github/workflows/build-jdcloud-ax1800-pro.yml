@@ -1,4 +1,4 @@
-name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（第15次修改）
+name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（最终稳定版）
 
 on:
   workflow_dispatch:
@@ -57,18 +57,19 @@ jobs:
           fi
           echo "✅ Lean源码克隆成功"
 
-      - name: 手动克隆iStore源（增强网络容错 + 多源备用）
+      - name: 克隆iStore并删除冲突包（方案一，彻底解决冲突）
         working-directory: ./lede
         run: |
           rm -rf feeds/ feeds.conf
           mkdir -p feeds/
-
+          
+          # 多源备用克隆iStore
           REPO_URLS=(
             "https://github.com/istoreos/istore.git"
             "https://github.com/linkease/istore.git"
             "https://github.com/linkease/istore-packages.git"
           )
-
+          
           CLONE_SUCCESS=0
           for repo in "${REPO_URLS[@]}"; do
             echo "🔍 测试连通性: $repo"
@@ -78,7 +79,7 @@ jobs:
               echo "⚠️ 仓库不可达，尝试下一个..."
               continue
             fi
-
+            
             for i in 1 2 3 4 5; do
               echo "第${i}次尝试克隆 $repo ..."
               rm -rf feeds/istore
@@ -90,18 +91,26 @@ jobs:
               rm -rf feeds/istore
               sleep 30
             done
-
+            
             if [ $CLONE_SUCCESS -eq 1 ]; then
               echo "✅ iStore源克隆成功 (来自: $repo)"
               break
             fi
           done
-
+          
           if [ $CLONE_SUCCESS -ne 1 ]; then
             echo "❌ 所有iStore源均克隆失败"
             exit 1
           fi
-
+          
+          # 关键：删除与官方luci源冲突的包（物理删除）
+          echo "🧹 清理冲突包..."
+          rm -rf feeds/istore/luci/applications/luci-app-passwall
+          rm -rf feeds/istore/luci/applications/luci-app-passwall2
+          rm -rf feeds/istore/luci/applications/luci-app-ssr-plus
+          # 若有其他冲突可继续添加
+          
+          # 生成feeds.conf
           cat > feeds.conf << EOF
           src-git packages https://github.com/coolsnowwolf/packages
           src-git luci https://github.com/coolsnowwolf/luci
@@ -109,81 +118,67 @@ jobs:
           src-git telephony https://github.com/coolsnowwolf/telephony
           src-link istore feeds/istore
           EOF
-          echo "✅ feeds.conf生成完成"
+          echo "✅ feeds.conf生成，冲突包已删除"
 
-      - name: 更新并安装feeds（仅安装iStore必要包，避免冲突）
+      - name: 更新并安装所有feeds
         working-directory: ./lede
         run: |
           ./scripts/feeds update -a
-          
-          # 先安装iStore源中的全部包（自动拉取依赖）
-          ./scripts/feeds install -a -p istore
-          
-          # 逐个安装其他所需包
-          ./scripts/feeds install luci
-          ./scripts/feeds install luci-i18n-base-zh-cn
-          ./scripts/feeds install luci-theme-argon
-          ./scripts/feeds install luci-app-istore
-          ./scripts/feeds install luci-app-istorex
-          ./scripts/feeds install luci-app-quickstart
-          ./scripts/feeds install luci-app-upnp
-          ./scripts/feeds install luci-app-ddns
-          ./scripts/feeds install luci-app-ttyd
-          ./scripts/feeds install luci-app-nlbwmon
-          ./scripts/feeds install luci-app-arpbind
-          ./scripts/feeds install luci-app-turboacc
-          
-          ./scripts/feeds install kmod-qca-nss-drv
-          ./scripts/feeds install kmod-qca-nss-drv-qdisc
-          ./scripts/feeds install kmod-qca-nss-ecm
-          
-          echo "✅ 所有必需feeds安装成功"
+          ./scripts/feeds install -a   # 此时不会再报冲突
+          echo "✅ 所有feeds安装成功"
 
       - name: 生成京东云AX1800 Pro配置
         working-directory: ./lede
         run: |
-          # 1. 创建设备基础配置（直接指定设备，防止 defconfig 覆盖）
+          # 1. 写入设备核心配置（确保不被覆盖）
           cat > .config << 'EOF'
           CONFIG_TARGET_ipq60xx=y
           CONFIG_TARGET_ipq60xx_generic=y
           CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y
           EOF
           
-          # 2. 生成该设备的默认配置（会保留设备选项并补全默认包）
+          # 2. 生成该设备的默认完整配置
           make defconfig
           
-          # 3. 使用 scripts/config 安全启用额外软件包
-          ./scripts/config -e CONFIG_TARGET_ROOTFS_SQUASHFS
-          ./scripts/config -e CONFIG_STRIP_KERNEL_EXPORTS
-          ./scripts/config -e CONFIG_USE_MKLIBS
+          # 3. 追加所需软件包（直接修改.config）
+          cat >> .config << 'EOF'
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_STRIP_KERNEL_EXPORTS=y
+          CONFIG_USE_MKLIBS=y
           
-          ./scripts/config -e CONFIG_PACKAGE_luci
-          ./scripts/config -e CONFIG_PACKAGE_luci-i18n-base-zh-cn
-          ./scripts/config -e CONFIG_PACKAGE_luci-theme-argon
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          CONFIG_PACKAGE_luci-theme-argon=y
           
-          ./scripts/config -e CONFIG_PACKAGE_luci-app-istore
-          ./scripts/config -e CONFIG_PACKAGE_luci-app-istorex
-          ./scripts/config -e CONFIG_PACKAGE_luci-app-quickstart
+          CONFIG_PACKAGE_luci-app-istore=y
+          CONFIG_PACKAGE_luci-app-istorex=y
+          CONFIG_PACKAGE_luci-app-quickstart=y
           
-          ./scripts/config -e CONFIG_PACKAGE_kmod-qca-nss-drv
-          ./scripts/config -e CONFIG_PACKAGE_kmod-qca-nss-drv-qdisc
-          ./scripts/config -e CONFIG_PACKAGE_kmod-qca-nss-ecm
-          ./scripts/config -e CONFIG_PACKAGE_luci-app-turboacc
+          CONFIG_PACKAGE_kmod-qca-nss-drv=y
+          CONFIG_PACKAGE_kmod-qca-nss-drv-qdisc=y
+          CONFIG_PACKAGE_kmod-qca-nss-ecm=y
+          CONFIG_PACKAGE_luci-app-turboacc=y
           
-          ./scripts/config -e CONFIG_PACKAGE_luci-app-upnp
-          ./scripts/config -e CONFIG_PACKAGE_luci-app-ddns
-          ./scripts/config -e CONFIG_PACKAGE_luci-app-ttyd
-          ./scripts/config -e CONFIG_PACKAGE_luci-app-nlbwmon
-          ./scripts/config -e CONFIG_PACKAGE_luci-app-arpbind
+          CONFIG_PACKAGE_luci-app-upnp=y
+          CONFIG_PACKAGE_luci-app-ddns=y
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          CONFIG_PACKAGE_luci-app-nlbwmon=y
+          CONFIG_PACKAGE_luci-app-arpbind=y
+          EOF
           
-          # 4. 用 oldconfig 补全依赖（自动回车接受默认值）
-          yes '' | make oldconfig
+          # 4. 用 oldconfig 自动补全所有依赖（现在冲突已解决，应能顺利通过）
+          echo "🔄 补全配置依赖..."
+          if ! make oldconfig < /dev/null; then
+            echo "❌ make oldconfig 失败，尝试详细输出:"
+            make oldconfig V=s < /dev/null
+            exit 1
+          fi
           
-          # 5. 验证设备配置是否保留
+          # 5. 验证设备配置是否还在
           if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "✅ 设备配置验证通过"
           else
-            echo "❌ 设备配置错误，请检查源码支持的型号"
+            echo "❌ 设备配置丢失，请检查源码支持的型号"
             grep -i jdcloud .config || true
             exit 1
           fi
