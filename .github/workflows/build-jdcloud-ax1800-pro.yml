@@ -68,10 +68,10 @@ jobs:
       - name: 生成京东云AX1800 Pro配置
         working-directory: ./lede
         run: |
-          # 1. 初始 defconfig
+          # 初始 defconfig
           make defconfig 2>&1 | tee defconfig1.log
           
-          # 2. 强制写入设备目标
+          # 强制写入设备目标
           sed -i '/^CONFIG_TARGET_/d' .config
           cat >> .config << EOF
           CONFIG_TARGET_qualcommax=y
@@ -81,7 +81,7 @@ jobs:
           
           make defconfig 2>&1 | tee defconfig2.log
           
-          # 3. 添加所有需要的软件包
+          # 添加需要的软件包
           cat >> .config << EOF
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_STRIP_KERNEL_EXPORTS=y
@@ -116,21 +116,22 @@ jobs:
           CONFIG_PACKAGE_luci-app-sms-tool=y
           EOF
           
-          # 4. 禁用 DRM 及辅助桥接模块（防止内核编译错误）
-          echo "🔧 正在禁用不需要的 DRM 模块..."
-          sed -i '/^CONFIG_DRM_AUX_BRIDGE/d' .config
-          sed -i '/^CONFIG_DRM_BRIDGE/d' .config
-          sed -i '/^CONFIG_DRM\b/d' .config
+          # 最终 defconfig 解析依赖
+          make defconfig 2>&1 | tee defconfig_final.log
+          
+          # ---------- 后处理：强制禁用整个 DRM 子系统 ----------
+          # 这一步必须在所有 defconfig 之后执行，并确保后续不运行任何配置工具
+          echo "🔧 彻底禁用 DRM 显示驱动（路由器不需要）..."
+          sed -i '/^CONFIG_DRM/d' .config
+          sed -i '/^# CONFIG_DRM/d' .config
           cat >> .config << EOF
           # CONFIG_DRM is not set
           # CONFIG_DRM_BRIDGE is not set
           # CONFIG_DRM_AUX_BRIDGE is not set
           EOF
+          # ---------- 后处理结束 ----------
           
-          # 5. 最终 defconfig 补全依赖
-          make defconfig 2>&1 | tee defconfig_final.log
-          
-          # 6. 验证设备配置是否存在
+          # 验证设备配置是否存在
           if grep -q "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "✅ 设备配置验证通过"
           else
