@@ -180,7 +180,7 @@ jobs:
             lede/compile.log
             lede/*.log
 
-      - name: 提取并重命名固件
+      - name: 提取固件到 output 目录
         if: success()
         run: |
           mkdir -p output
@@ -189,16 +189,31 @@ jobs:
           cp lede/bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*squashfs-factory.bin output/LEDE-AX1800Pro-${DATE}_factory.bin
           cp lede/bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*squashfs-sysupgrade.bin output/LEDE-AX1800Pro-${DATE}_sysupgrade.bin
           
-          echo "✅ 编译完成！生成的固件："
+          echo "✅ 固件已提取到 output 目录"
           ls -lh output/
 
-      # ----- 修正点：使用 v2 版本标签替代特定 commit SHA -----
-      - name: 发布到GitHub Releases
-        uses: softprops/action-gh-release@v2
+      - name: 发布到 GitHub Releases（使用 gh 命令）
         if: success()
-        with:
-          tag_name: ax1800pro-${{ github.run_number }}
-          name: 京东云AX1800 Pro LEDE固件 ${{ github.run_number }}
-          files: output/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="ax1800pro-${{ github.run_number }}"
+          echo "🚀 创建 Release: $TAG"
+          
+          # 如果该 tag 已存在（重复运行），先删除它
+          gh release view "$TAG" > /dev/null 2>&1 && {
+            echo "⚠️ 已存在同名 Release，正在删除..."
+            gh release delete "$TAG" --yes || true
+          }
+          
+          # 创建新的 Release 并上传固件
+          gh release create "$TAG" \
+            output/* \
+            --title "京东云AX1800 Pro LEDE固件 ${{ github.run_number }}" \
+            --notes "自动编译生成，包含 USB 网卡支持和短信功能。
+          
+          - 设备: jdcloud_re-ss-01
+          - 分支: ${{ inputs.branch }}
+          - 编译时间: $(date '+%Y-%m-%d %H:%M:%S')"
+          
+          echo "✅ 固件发布成功"
