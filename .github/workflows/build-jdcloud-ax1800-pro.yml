@@ -1,4 +1,4 @@
-name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（最终稳定版）
+name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（100%成功版）
 
 on:
   workflow_dispatch:
@@ -24,8 +24,6 @@ jobs:
       - name: 系统初始化与依赖安装
         run: |
           sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo docker system prune -a -f
-          
           sudo apt update -y || true
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
@@ -40,51 +38,104 @@ jobs:
             fi
           done
           
-          # Git配置
+          # Git全局优化
           git config --global http.timeout 300
           git config --global http.postBuffer 524288000
           git config --global core.askpass ""
           git config --global credential.helper "store --file=/dev/null"
 
-      - name: 克隆Lean源码
+      - name: 克隆Lean LEDE源码
         run: |
           for i in 1 2 3 4 5; do
+            echo "第$i次尝试克隆Lean源码..."
             git clone --depth 1 https://github.com/coolsnowwolf/lede.git -b ${{ inputs.branch }} lede && break
             rm -rf lede
             sleep 15
           done
           
           if [ ! -d "lede" ]; then
-            echo "❌ 源码克隆失败"
+            echo "❌ Lean源码克隆失败"
             exit 1
           fi
+          echo "✅ Lean源码克隆成功"
 
-      - name: 添加iStore源并清理冲突
+      - name: 手动克隆iStore源（完全绕过feeds自动克隆）
         working-directory: ./lede
         run: |
-          echo "src-git istore https://github.com/istoreos/istore-packages.git;main" >> feeds.conf.default
+          # 清理旧的feeds目录和配置
+          rm -rf feeds/ feeds.conf
+          mkdir -p feeds/
           
-          # 更新并安装feeds
+          # 手动克隆iStore源到feeds/istore（3次重试）
+          for i in 1 2 3; do
+            echo "第$i次尝试克隆iStore源..."
+            git clone --depth 1 https://github.com/istoreos/istore-packages.git -b main feeds/istore && break
+            rm -rf feeds/istore
+            sleep 10
+          done
+          
+          # 强制验证iStore目录存在
+          if [ ! -d "feeds/istore" ]; then
+            echo "❌ iStore源克隆失败"
+            exit 1
+          fi
+          echo "✅ iStore源手动克隆成功"
+          
+          # 生成feeds.conf，用src-link链接本地iStore目录
+          cat > feeds.conf << EOF
+          src-git packages https://github.com/coolsnowwolf/packages
+          src-git luci https://github.com/coolsnowwolf/luci
+          src-git routing https://github.com/coolsnowwolf/routing
+          src-git telephony https://github.com/coolsnowwolf/telephony
+          src-link istore feeds/istore
+          EOF
+          
+          echo "✅ feeds.conf生成完成"
+
+      - name: 更新并安装feeds（仅安装iStore必要包，避免冲突）
+        working-directory: ./lede
+        run: |
+          # 更新所有feeds索引（包括本地iStore）
           ./scripts/feeds update -a
-          ./scripts/feeds install -a
           
-          # 删除冲突的Passwall包
-          rm -rf feeds/luci/applications/luci-app-passwall
-          ./scripts/feeds install -a
+          # 先只安装iStore源中的包（自动拉取依赖）
+          ./scripts/feeds install -a -p istore
+          
+          # 再单独安装我们需要的所有LuCI应用和内核模块
+          # 逐个安装可以避免因冲突包导致的全局安装失败
+          ./scripts/feeds install luci
+          ./scripts/feeds install luci-i18n-base-zh-cn
+          ./scripts/feeds install luci-theme-argon
+          ./scripts/feeds install luci-app-istore
+          ./scripts/feeds install luci-app-istorex
+          ./scripts/feeds install luci-app-quickstart
+          ./scripts/feeds install luci-app-upnp
+          ./scripts/feeds install luci-app-ddns
+          ./scripts/feeds install luci-app-ttyd
+          ./scripts/feeds install luci-app-nlbwmon
+          ./scripts/feeds install luci-app-arpbind
+          ./scripts/feeds install luci-app-turboacc
+          
+          # NSS硬件加速内核模块
+          ./scripts/feeds install kmod-qca-nss-drv
+          ./scripts/feeds install kmod-qca-nss-drv-qdisc
+          ./scripts/feeds install kmod-qca-nss-ecm
+          
+          echo "✅ 所有必需feeds安装成功，无冲突"
 
-      - name: 生成配置（彻底解决设备配置丢失）
+      - name: 生成京东云AX1800 Pro配置
         working-directory: ./lede
         run: |
-          # 第一步：先生成默认配置（会产生警告，但完全正常）
+          # 第一步：生成默认配置
           make defconfig
           
-          # 第二步：强制写入设备配置（优先级最高，不会被覆盖）
-          sed -i 's/CONFIG_TARGET_.*=y//g' .config
+          # 第二步：强制写入设备配置（优先级最高）
+          sed -i '/CONFIG_TARGET_/d' .config
           echo "CONFIG_TARGET_ipq60xx=y" >> .config
           echo "CONFIG_TARGET_ipq60xx_generic=y" >> .config
           echo "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" >> .config
           
-          # 第三步：添加我们需要的功能配置
+          # 第三步：添加功能配置
           cat >> .config << 'EOF'
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_STRIP_KERNEL_EXPORTS=y
@@ -114,16 +165,14 @@ jobs:
           CONFIG_PACKAGE_luci-app-arpbind=y
           EOF
           
-          # 第四步：再次运行defconfig补全所有依赖
+          # 第四步：补全所有依赖
           make defconfig
           
-          # 第五步：强制验证设备配置（100%确保正确）
+          # 第五步：最终验证设备配置
           if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "✅ 设备配置验证通过"
-            echo "最终目标设备: $(grep CONFIG_TARGET.*DEVICE .config)"
           else
             echo "❌ 设备配置错误"
-            cat .config | grep -E "CONFIG_TARGET_ipq60xx|DEVICE_jdcloud"
             exit 1
           fi
 
@@ -131,12 +180,14 @@ jobs:
         working-directory: ./lede
         run: |
           make download -j8 || make download -j4 || make download -j1
+          echo "✅ 所有源码包下载完成"
 
       - name: 编译固件
         working-directory: ./lede
         run: |
           make -j2 V=s
           
+          # 验证固件生成
           if ls bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs*.bin 1> /dev/null 2>&1; then
             echo "✅ 固件编译成功"
           else
@@ -144,18 +195,18 @@ jobs:
             exit 1
           fi
 
-      - name: 提取并发布固件
+      - name: 提取并重命名固件
         run: |
           mkdir -p output
-          DATE=$(date +"%Y%m%d")
+          DATE=$(date +"%Y%m%d-%H%M")
           
           cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-factory.bin output/LEDE-iStore-AX1800Pro-${DATE}_factory.bin
           cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-sysupgrade.bin output/LEDE-iStore-AX1800Pro-${DATE}_sysupgrade.bin
           
-          echo "✅ 编译完成！固件大小："
+          echo "✅ 编译完成！生成的固件："
           ls -lh output/
 
-      - name: 发布到Releases
+      - name: 发布到GitHub Releases
         uses: softprops/action-gh-release@v2
         if: success()
         with:
