@@ -61,17 +61,15 @@ jobs:
         working-directory: ./lede
         run: |
           echo "src-git smstool https://github.com/dwj0/luci-app-sms-tool.git" >> feeds.conf.default
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          ./scripts/feeds update -a 2>&1 | tee feeds_update.log
+          ./scripts/feeds install -a 2>&1 | tee feeds_install.log
           echo "✅ 所有feeds安装完成"
 
       - name: 生成京东云AX1800 Pro配置
         working-directory: ./lede
         run: |
-          # 1. 生成默认配置
-          make defconfig
+          make defconfig 2>&1 | tee defconfig1.log
           
-          # 2. 完全清除原有 TARGET 配置，写入正确的设备三行
           sed -i '/^CONFIG_TARGET_/d' .config
           cat >> .config << EOF
           CONFIG_TARGET_qualcommax=y
@@ -79,10 +77,8 @@ jobs:
           CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y
           EOF
           
-          # 3. 基于该设备生成完整默认配置
-          make defconfig
+          make defconfig 2>&1 | tee defconfig2.log
           
-          # 4. 追加所需软件包
           cat >> .config << EOF
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_STRIP_KERNEL_EXPORTS=y
@@ -103,7 +99,6 @@ jobs:
           CONFIG_PACKAGE_luci-app-nlbwmon=y
           CONFIG_PACKAGE_luci-app-arpbind=y
           
-          # USB 网卡支持（中兴F50等）
           CONFIG_PACKAGE_kmod-usb-core=y
           CONFIG_PACKAGE_kmod-usb-net=y
           CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
@@ -113,16 +108,17 @@ jobs:
           CONFIG_PACKAGE_kmod-usb-serial=y
           CONFIG_PACKAGE_usb-modeswitch=y
           
-          # 短信功能（ModemManager + smstool）
           CONFIG_PACKAGE_modemmanager=y
           CONFIG_PACKAGE_luci-proto-modemmanager=y
           CONFIG_PACKAGE_luci-app-sms-tool=y
           EOF
           
-          # 5. 最后一次 defconfig 补全所有新依赖
-          make defconfig
+          # 禁用无用的 DRM 模块，避免内核编译错误
+          ./scripts/config -d CONFIG_DRM_AUX_BRIDGE
+          ./scripts/config -d CONFIG_DRM_BRIDGE
           
-          # 6. 验证设备配置是否保留
+          make defconfig 2>&1 | tee defconfig_final.log
+          
           if grep -q "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "✅ 设备配置验证通过"
           else
@@ -134,32 +130,52 @@ jobs:
       - name: 预下载源码包
         working-directory: ./lede
         run: |
-          make download -j8 || make download -j4 || make download -j1
+          make download -j8 2>&1 | tee download.log || make download -j4 2>&1 | tee -a download.log || make download -j1 2>&1 | tee -a download.log
           echo "✅ 所有源码包下载完成"
 
-      - name: 编译固件
+      - name: 编译固件（增强内存 + 容错）
         working-directory: ./lede
         run: |
-          make -j2 V=s
+          sudo fallocate -l 2G /swapfile || true
+          sudo chmod 600 /swapfile || true
+          sudo mkswap /swapfile || true
+          sudo swapon /swapfile || true
+          echo "✅ Swap 已启用"
           
-          # 验证固件生成（使用通配符匹配）
+          echo "🔄 开始单线程编译..."
+          make -j1 V=s 2>&1 | tee compile.log
+          
           if ls bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*squashfs*.bin 1> /dev/null 2>&1; then
             echo "✅ 固件编译成功"
           else
-            echo "❌ 固件编译失败"
-            exit 1
+            echo "⚠️ 单线程编译未生成固件，尝试双线程编译..."
+            make -j2 V=s 2>&1 | tee -a compile.log
+            if ls bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*squashfs*.bin 1> /dev/null 2>&1; then
+              echo "✅ 双线程编译成功"
+            else
+              echo "❌ 固件编译失败，请查看日志尾部："
+              tail -n 100 compile.log
+              exit 1
+            fi
           fi
 
+      - name: 上传编译日志（总是执行）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            lede/compile.log
+            lede/*.log
+
       - name: 提取并重命名固件
+        if: success()
         run: |
           mkdir -p output
           DATE=$(date +"%Y%m%d-%H%M")
           
-          # 兼容旧的路径格式，复制前确认文件存在
-          if ls lede/bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*squashfs*.bin 1> /dev/null 2>&1; then
-            cp lede/bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*squashfs-factory.bin output/LEDE-AX1800Pro-${DATE}_factory.bin
-            cp lede/bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*squashfs-sysupgrade.bin output/LEDE-AX1800Pro-${DATE}_sysupgrade.bin
-          fi
+          cp lede/bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*squashfs-factory.bin output/LEDE-AX1800Pro-${DATE}_factory.bin
+          cp lede/bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*squashfs-sysupgrade.bin output/LEDE-AX1800Pro-${DATE}_sysupgrade.bin
           
           echo "✅ 编译完成！生成的固件："
           ls -lh output/
