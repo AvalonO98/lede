@@ -1,4 +1,4 @@
-name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（纯原生无代理版）
+name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（稳定无错版）
 
 on:
   workflow_dispatch:
@@ -12,7 +12,6 @@ on:
           - master
 
 env:
-  # 强制Node.js 24（GitHub 2026.6.16强制要求）
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   TZ: Asia/Shanghai
 
@@ -22,57 +21,61 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: 系统初始化与Git全局优化（解决HTTPS克隆问题）
+      - name: 系统初始化与依赖安装（修复exit code 5）
         run: |
-          # 安装完整编译依赖
-          sudo apt update -y
-          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-          gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
-          file wget curl libelf-dev device-tree-compiler u-boot-tools
+          # 清理系统释放空间
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo docker system prune -a -f
           
-          # 关键Git配置：彻底解决HTTPS克隆认证失败
+          # 更新软件源
+          sudo apt update -y || true
+          
+          # 只安装Lean官方必需的依赖（精简版，无多余32位库）
+          sudo apt install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
+            file wget curl libelf-dev device-tree-compiler u-boot-tools || true
+          
+          # 强制验证关键依赖是否安装成功
+          for cmd in git make gcc g++ flex bison; do
+            if ! command -v $cmd &> /dev/null; then
+              echo "❌ 关键依赖 $cmd 安装失败"
+              exit 1
+            fi
+          done
+          
+          echo "✅ 所有必需依赖安装成功"
+          
+          # Git全局配置（解决HTTPS克隆问题）
           git config --global http.timeout 300
           git config --global http.postBuffer 524288000
-          git config --global http.lowSpeedLimit 1000
-          git config --global http.lowSpeedTime 60
-          git config --global core.askpass ""          # 禁用密码提示
-          git config --global credential.helper "store --file=/dev/null"  # 不保存凭证
-          git config --global --unset-all http.proxy  # 清除所有代理
-          git config --global --unset-all https.proxy
-          
-          echo "✅ Git全局配置完成"
+          git config --global core.askpass ""
+          git config --global credential.helper "store --file=/dev/null"
 
-      - name: 克隆Lean LEDE源码（5次重试机制）
+      - name: 克隆Lean LEDE源码（5次重试）
         run: |
-          # 清理旧文件
-          rm -rf lede
-          mkdir -p lede
-          cd lede
-          
-          # 5次重试克隆原生GitHub地址
           for i in 1 2 3 4 5; do
             echo "第$i次尝试克隆Lean源码..."
-            git clone --depth 1 https://github.com/coolsnowwolf/lede.git -b ${{ inputs.branch }} . && break
+            git clone --depth 1 https://github.com/coolsnowwolf/lede.git -b ${{ inputs.branch }} lede && break
             echo "克隆失败，等待15秒后重试..."
-            rm -rf .git *
+            rm -rf lede
             sleep 15
           done
           
-          # 验证克隆结果
-          if [ -f "feeds.conf.default" ]; then
-            echo "✅ Lean源码克隆成功，版本: $(git rev-parse --short HEAD)"
-          else
+          if [ ! -d "lede" ]; then
             echo "❌ Lean源码克隆失败"
             exit 1
           fi
+          
+          echo "✅ Lean源码克隆成功"
 
-      - name: 添加iStore官方源并清理冲突包
+      - name: 添加iStore源并清理冲突包
         working-directory: ./lede
         run: |
-          # 添加iStore官方原生地址
+          # 添加iStore官方源
           echo "src-git istore https://github.com/istoreos/istore-packages.git;main" >> feeds.conf.default
           
-          # 3次重试更新feeds
+          # 更新feeds
           for i in 1 2 3; do
             ./scripts/feeds update -a && break
             echo "⚠️ feeds更新失败，第$i次重试..."
@@ -81,18 +84,17 @@ jobs:
             sleep 10
           done
           
-          # 安装所有feeds
+          # 安装feeds
           ./scripts/feeds install -a
           
-          # 关键修复：删除有依赖问题的Passwall包
+          # 删除冲突的Passwall包
           rm -rf feeds/luci/applications/luci-app-passwall
           echo "✅ 已删除冲突的luci-app-passwall包"
           
-          # 再次安装确保没有残留
+          # 再次安装确保无残留
           ./scripts/feeds install -a
-          echo "✅ 所有feeds安装成功"
 
-      - name: 生成京东云AX1800 Pro官方配置
+      - name: 生成京东云AX1800 Pro配置
         working-directory: ./lede
         run: |
           cat > .config << 'EOF'
@@ -102,43 +104,34 @@ jobs:
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_STRIP_KERNEL_EXPORTS=y
           CONFIG_USE_MKLIBS=y
-          CONFIG_TARGET_OPTIMIZATION="-O2 -pipe -march=armv8-a+crypto"
-          CONFIG_DEBUG=n
-          CONFIG_NO_STRIP=n
           
-          # LuCI基础系统
+          # LuCI基础
           CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-base=y
-          CONFIG_PACKAGE_luci-mod-admin-full=y
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
           CONFIG_PACKAGE_luci-theme-argon=y
           
-          # iStore应用商店核心
+          # iStore应用商店
           CONFIG_PACKAGE_luci-app-istore=y
           CONFIG_PACKAGE_luci-app-istorex=y
           CONFIG_PACKAGE_luci-app-quickstart=y
           
-          # 高通NSS硬件加速（千兆转发必备）
+          # NSS硬件加速
           CONFIG_PACKAGE_kmod-qca-nss-drv=y
           CONFIG_PACKAGE_kmod-qca-nss-drv-qdisc=y
           CONFIG_PACKAGE_kmod-qca-nss-ecm=y
-          CONFIG_PACKAGE_kmod-qca-nss-crypto=y
           CONFIG_PACKAGE_luci-app-turboacc=y
           
-          # 基础必备插件
+          # 基础插件
           CONFIG_PACKAGE_luci-app-upnp=y
           CONFIG_PACKAGE_luci-app-ddns=y
           CONFIG_PACKAGE_luci-app-ttyd=y
           CONFIG_PACKAGE_luci-app-nlbwmon=y
           CONFIG_PACKAGE_luci-app-arpbind=y
-          CONFIG_PACKAGE_luci-app-autoreboot=y
-          CONFIG_PACKAGE_luci-app-wol=y
           EOF
           
-          # 补全所有默认配置
           make defconfig
           
-          # 强制验证设备配置
+          # 验证设备配置
           if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "✅ 设备配置验证通过"
           else
@@ -146,16 +139,15 @@ jobs:
             exit 1
           fi
 
-      - name: 预下载所有源码包
+      - name: 预下载源码包
         working-directory: ./lede
         run: |
           make download -j8 || make download -j4 || make download -j1
           echo "✅ 所有源码包下载完成"
 
-      - name: 编译固件（稳定2线程）
+      - name: 编译固件
         working-directory: ./lede
         run: |
-          echo "开始编译固件，使用2线程（GitHub免费机最稳定配置）"
           make -j2 V=s
           
           # 验证固件生成
@@ -166,59 +158,23 @@ jobs:
             exit 1
           fi
 
-      - name: 提取并重命名固件
+      - name: 提取固件
         run: |
           mkdir -p output
-          DATE=$(date +"%Y%m%d-%H%M")
+          DATE=$(date +"%Y%m%d")
           
-          # 复制固件文件
-          cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-factory.bin output/Lean-iStore-AX1800Pro-${DATE}_factory.bin
-          cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-sysupgrade.bin output/Lean-iStore-AX1800Pro-${DATE}_sysupgrade.bin
+          cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-factory.bin output/LEDE-iStore-AX1800Pro-${DATE}_factory.bin
+          cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-sysupgrade.bin output/LEDE-iStore-AX1800Pro-${DATE}_sysupgrade.bin
           
-          # 生成说明文件
-          cat > output/README.txt << EOF
-          京东云亚瑟AX1800 Pro (RE-SS-01) 稳定固件
-          ==================================================
-          编译日期: $DATE
-          固件大小: ~52MB（符合60MB分区限制）
-          运行环境: GitHub Actions Node.js 24
-          源码来源: https://github.com/coolsnowwolf/lede
-          iStore版本: 官方main分支
-          
-          文件说明:
-          - *_factory.bin: 从U-Boot界面首次刷入使用
-          - *_sysupgrade.bin: OpenWrt系统内升级使用
-          
-          默认信息:
-          - 管理地址: http://192.168.1.1
-          - 用户名: root
-          - 密码: password
-          
-          核心功能:
-          ✅ iStore官方应用商店（一键安装上百插件）
-          ✅ 高通NSS千兆硬件加速（NAT转发可达1000Mbps）
-          ✅ LuCI Web管理界面（完整中文）
-          ✅ Argon美观主题
-          ✅ 网页终端（ttyd）
-          ✅ 实时带宽监控
-          ✅ IP/MAC地址绑定
-          ✅ 定时重启
-          ✅ 网络唤醒
-          ✅ UPnP端口映射
-          ✅ DDNS动态域名
-          EOF
-          
-          # 显示固件信息
           echo "✅ 编译完成！生成的固件："
           ls -lh output/
 
-      - name: 发布到GitHub Releases
+      - name: 发布到Releases
         uses: softprops/action-gh-release@v2
         if: success()
         with:
-          tag_name: lean-istore-ax1800pro-${{ github.run_number }}
+          tag_name: ax1800pro-${{ github.run_number }}
           name: 京东云AX1800 Pro LEDE+iStore固件 ${{ github.run_number }}
-          body_path: output/README.txt
           files: output/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
