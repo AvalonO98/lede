@@ -1,4 +1,4 @@
-name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（100%成功版）
+name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（第15次修改）
 
 on:
   workflow_dispatch:
@@ -30,7 +30,6 @@ jobs:
             gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
             file wget curl libelf-dev device-tree-compiler u-boot-tools bc pciutils lm-sensors || true
           
-          # 验证关键依赖
           for cmd in git make gcc g++ flex bison; do
             if ! command -v $cmd &> /dev/null; then
               echo "❌ 关键依赖 $cmd 安装失败"
@@ -38,7 +37,6 @@ jobs:
             fi
           done
           
-          # Git全局优化
           git config --global http.timeout 300
           git config --global http.postBuffer 524288000
           git config --global core.askpass ""
@@ -121,7 +119,7 @@ jobs:
           # 先安装iStore源中的全部包（自动拉取依赖）
           ./scripts/feeds install -a -p istore
           
-          # 再逐个安装我们需要的其他LuCI应用和内核模块
+          # 逐个安装其他所需包
           ./scripts/feeds install luci
           ./scripts/feeds install luci-i18n-base-zh-cn
           ./scripts/feeds install luci-theme-argon
@@ -144,50 +142,48 @@ jobs:
       - name: 生成京东云AX1800 Pro配置
         working-directory: ./lede
         run: |
-          # 1. 生成基础默认配置
-          make defconfig
-          
-          # 2. 添加功能配置
-          cat >> .config << 'EOF'
-          CONFIG_TARGET_ROOTFS_SQUASHFS=y
-          CONFIG_STRIP_KERNEL_EXPORTS=y
-          CONFIG_USE_MKLIBS=y
-          
-          CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-          CONFIG_PACKAGE_luci-theme-argon=y
-          
-          CONFIG_PACKAGE_luci-app-istore=y
-          CONFIG_PACKAGE_luci-app-istorex=y
-          CONFIG_PACKAGE_luci-app-quickstart=y
-          
-          CONFIG_PACKAGE_kmod-qca-nss-drv=y
-          CONFIG_PACKAGE_kmod-qca-nss-drv-qdisc=y
-          CONFIG_PACKAGE_kmod-qca-nss-ecm=y
-          CONFIG_PACKAGE_luci-app-turboacc=y
-          
-          CONFIG_PACKAGE_luci-app-upnp=y
-          CONFIG_PACKAGE_luci-app-ddns=y
-          CONFIG_PACKAGE_luci-app-ttyd=y
-          CONFIG_PACKAGE_luci-app-nlbwmon=y
-          CONFIG_PACKAGE_luci-app-arpbind=y
+          # 1. 创建设备基础配置（直接指定设备，防止 defconfig 覆盖）
+          cat > .config << 'EOF'
+          CONFIG_TARGET_ipq60xx=y
+          CONFIG_TARGET_ipq60xx_generic=y
+          CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y
           EOF
           
-          # 3. 强制写入设备选择（删除所有旧TARGET行，再添加）
-          sed -i '/^CONFIG_TARGET_ipq60xx/d' .config
-          echo "CONFIG_TARGET_ipq60xx=y" >> .config
-          echo "CONFIG_TARGET_ipq60xx_generic=y" >> .config
-          echo "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" >> .config
+          # 2. 生成该设备的默认配置（会保留设备选项并补全默认包）
+          make defconfig
           
-          # 4. 使用 olddefconfig 安全补全依赖（不会覆盖已设置的选项）
-          make olddefconfig
+          # 3. 使用 scripts/config 安全启用额外软件包
+          ./scripts/config -e CONFIG_TARGET_ROOTFS_SQUASHFS
+          ./scripts/config -e CONFIG_STRIP_KERNEL_EXPORTS
+          ./scripts/config -e CONFIG_USE_MKLIBS
           
-          # 5. 双重验证设备配置
+          ./scripts/config -e CONFIG_PACKAGE_luci
+          ./scripts/config -e CONFIG_PACKAGE_luci-i18n-base-zh-cn
+          ./scripts/config -e CONFIG_PACKAGE_luci-theme-argon
+          
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-istore
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-istorex
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-quickstart
+          
+          ./scripts/config -e CONFIG_PACKAGE_kmod-qca-nss-drv
+          ./scripts/config -e CONFIG_PACKAGE_kmod-qca-nss-drv-qdisc
+          ./scripts/config -e CONFIG_PACKAGE_kmod-qca-nss-ecm
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-turboacc
+          
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-upnp
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-ddns
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-ttyd
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-nlbwmon
+          ./scripts/config -e CONFIG_PACKAGE_luci-app-arpbind
+          
+          # 4. 用 oldconfig 补全依赖（自动回车接受默认值）
+          yes '' | make oldconfig
+          
+          # 5. 验证设备配置是否保留
           if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "✅ 设备配置验证通过"
           else
-            echo "❌ 设备配置错误，设备名称可能不正确，请检查源码支持的型号"
-            # 打印所有包含 jdcloud 的行帮助排查
+            echo "❌ 设备配置错误，请检查源码支持的型号"
             grep -i jdcloud .config || true
             exit 1
           fi
