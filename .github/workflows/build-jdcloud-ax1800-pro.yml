@@ -119,8 +119,7 @@ jobs:
           # 最终 defconfig 解析依赖
           make defconfig 2>&1 | tee defconfig_final.log
           
-          # ---------- 后处理：强制禁用整个 DRM 子系统 ----------
-          # 这一步必须在所有 defconfig 之后执行，并确保后续不运行任何配置工具
+          # ---------- 强制禁用 DRM 子系统 ----------
           echo "🔧 彻底禁用 DRM 显示驱动（路由器不需要）..."
           sed -i '/^CONFIG_DRM/d' .config
           sed -i '/^# CONFIG_DRM/d' .config
@@ -129,9 +128,9 @@ jobs:
           # CONFIG_DRM_BRIDGE is not set
           # CONFIG_DRM_AUX_BRIDGE is not set
           EOF
-          # ---------- 后处理结束 ----------
+          # ---------- 结束 ----------
           
-          # 验证设备配置是否存在
+          # 验证设备配置
           if grep -q "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "✅ 设备配置验证通过"
           else
@@ -193,6 +192,7 @@ jobs:
           echo "✅ 编译完成！生成的固件："
           ls -lh output/
 
+      # ----- 修正点：使用 v2 版本标签替代特定 commit SHA -----
       - name: 发布到GitHub Releases
         uses: softprops/action-gh-release@v2
         if: success()
