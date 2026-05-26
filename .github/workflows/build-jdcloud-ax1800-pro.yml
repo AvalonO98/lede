@@ -65,25 +65,43 @@ jobs:
           ./scripts/feeds install -a
           echo "✅ 所有feeds安装完成"
 
-      - name: 配置目标为京东云亚瑟并添加所需软件包
+      - name: 检测京东云亚瑟真实设备名
         working-directory: ./lede
+        id: device_detect
         run: |
-          # 1. 生成默认配置 (会生成 x86_64 的基线)
-          make defconfig
+          echo "🔍 正在扫描 ipq60xx 平台设备列表..."
+          grep -r "define Device/" target/linux/ipq60xx/image/ | grep -i jdcloud || true
           
-          # 2. 将 x86_64 的目标精确替换为 jdcloud_re-ss-01
-          echo "🔄 正在将目标切换至京东云亚瑟..."
-          sed -i 's/CONFIG_TARGET_x86_64=y/CONFIG_TARGET_ipq60xx=y/' .config
-          sed -i 's/CONFIG_TARGET_x86_64_DEVICE_generic=y/CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y/' .config
-          # 确保子目标行也存在
-          if ! grep -q "CONFIG_TARGET_ipq60xx_generic=y" .config; then
-            echo "CONFIG_TARGET_ipq60xx_generic=y" >> .config
+          DEVICE_LINE=$(grep -r "define Device/" target/linux/ipq60xx/image/ | grep -i jdcloud | head -1)
+          if [ -z "$DEVICE_LINE" ]; then
+            echo "❌ 未找到任何 jdcloud 设备定义，请检查 Lean 源码是否支持该设备"
+            exit 1
           fi
           
-          # 3. 再次运行 defconfig 补全该设备的基础包
+          DEVICE_NAME=$(echo "$DEVICE_LINE" | sed -n 's/.*define Device\/\([^ ]*\).*/\1/p')
+          echo "✅ 检测到设备名: $DEVICE_NAME"
+          echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_OUTPUT
+
+      - name: 生成配置（动态设备名）
+        working-directory: ./lede
+        run: |
+          DEVICE_NAME="${{ steps.device_detect.outputs.DEVICE_NAME }}"
+          
+          # 1. 生成默认配置
           make defconfig
           
-          # 4. 追加我们需要的全部软件包
+          # 2. 完全清除原有 TARGET 配置，写入正确的设备三行
+          sed -i '/^CONFIG_TARGET_/d' .config
+          cat >> .config << EOF
+          CONFIG_TARGET_ipq60xx=y
+          CONFIG_TARGET_ipq60xx_generic=y
+          CONFIG_TARGET_ipq60xx_generic_DEVICE_${DEVICE_NAME}=y
+          EOF
+          
+          # 3. 基于该设备生成完整默认配置
+          make defconfig
+          
+          # 4. 追加所需软件包
           cat >> .config << EOF
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_STRIP_KERNEL_EXPORTS=y
@@ -123,12 +141,12 @@ jobs:
           # 5. 最后一次 defconfig 补全所有新依赖
           make defconfig
           
-          # 6. 验证设备是否还保留
-          if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
-            echo "✅ 设备配置验证通过"
+          # 6. 验证设备配置是否保留
+          if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_${DEVICE_NAME}=y" .config; then
+            echo "✅ 设备配置验证通过 (${DEVICE_NAME})"
           else
-            echo "❌ 设备配置丢失，当前 .config 中的设备项："
-            grep -E 'CONFIG_TARGET_.*DEVICE' .config || echo "无任何设备定义"
+            echo "❌ 设备配置再次丢失，当前设备项："
+            grep -E 'CONFIG_TARGET_.*DEVICE' .config || echo "无设备定义"
             exit 1
           fi
 
@@ -143,7 +161,8 @@ jobs:
         run: |
           make -j2 V=s
           
-          if ls bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs*.bin 1> /dev/null 2>&1; then
+          DEVICE_NAME="${{ steps.device_detect.outputs.DEVICE_NAME }}"
+          if ls bin/targets/ipq60xx/generic/*${DEVICE_NAME}*squashfs*.bin 1> /dev/null 2>&1; then
             echo "✅ 固件编译成功"
           else
             echo "❌ 固件编译失败"
@@ -152,11 +171,12 @@ jobs:
 
       - name: 提取并重命名固件
         run: |
+          DEVICE_NAME="${{ steps.device_detect.outputs.DEVICE_NAME }}"
           mkdir -p output
           DATE=$(date +"%Y%m%d-%H%M")
           
-          cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-factory.bin output/LEDE-AX1800Pro-${DATE}_factory.bin
-          cp lede/bin/targets/ipq60xx/generic/*jdcloud_re-ss-01*squashfs-sysupgrade.bin output/LEDE-AX1800Pro-${DATE}_sysupgrade.bin
+          cp lede/bin/targets/ipq60xx/generic/*${DEVICE_NAME}*squashfs-factory.bin output/LEDE-AX1800Pro-${DATE}_factory.bin
+          cp lede/bin/targets/ipq60xx/generic/*${DEVICE_NAME}*squashfs-sysupgrade.bin output/LEDE-AX1800Pro-${DATE}_sysupgrade.bin
           
           echo "✅ 编译完成！生成的固件："
           ls -lh output/
