@@ -1,4 +1,4 @@
-name: 京东云亚瑟AX1800 Pro LEDE编译（含USB网卡及短信）
+name: 京东云亚瑟AX1800 Pro LEDE编译（USB网卡+短信）
 
 on:
   workflow_dispatch:
@@ -60,11 +60,9 @@ jobs:
       - name: 配置额外feeds及更新安装
         working-directory: ./lede
         run: |
-          # 1. 添加额外的社区插件源 (smstool)
-          # 这一行会将 luci-app-sms-tool 的源码仓库添加到编译系统中
+          # 添加短信工具源
           echo "src-git smstool https://github.com/dwj0/luci-app-sms-tool.git" >> feeds.conf.default
           
-          # 2. 使用配置好的feeds.conf.default进行更新和安装
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           echo "✅ 所有feeds安装完成"
@@ -72,17 +70,32 @@ jobs:
       - name: 生成京东云AX1800 Pro配置
         working-directory: ./lede
         run: |
-          # 1. 直接写入设备核心配置
-          cat > .config << EOF
-          CONFIG_TARGET_ipq60xx=y
-          CONFIG_TARGET_ipq60xx_generic=y
-          CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y
-          EOF
-          
-          # 2. 基于该设备生成完整默认配置
+          # 1. 生成默认配置（x86_64或其他默认目标）
           make defconfig
           
-          # 3. 添加所有需要的插件和驱动
+          # 2. 使用官方脚本安全设置目标设备
+          echo "🔄 正在设置目标设备为 jdcloud_re-ss-01 ..."
+          ./scripts/config --device jdcloud_re-ss-01
+          
+          # 3. 验证设备设置是否成功
+          if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
+            echo "✅ 设备设置成功"
+          else
+            echo "❌ 设备设置失败，尝试手动修正..."
+            sed -i '/CONFIG_TARGET_/d' .config
+            echo "CONFIG_TARGET_ipq60xx=y" >> .config
+            echo "CONFIG_TARGET_ipq60xx_generic=y" >> .config
+            echo "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" >> .config
+            make defconfig
+            if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
+              echo "✅ 手动修正成功"
+            else
+              echo "❌ 仍然失败，请检查源码中是否包含该设备"
+              exit 1
+            fi
+          fi
+          
+          # 4. 启用所需功能
           cat >> .config << EOF
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_STRIP_KERNEL_EXPORTS=y
@@ -103,7 +116,7 @@ jobs:
           CONFIG_PACKAGE_luci-app-nlbwmon=y
           CONFIG_PACKAGE_luci-app-arpbind=y
           
-          # --- USB 网卡支持 (为中兴F50等设备增加) ---
+          # USB 网卡支持（中兴F50等）
           CONFIG_PACKAGE_kmod-usb-core=y
           CONFIG_PACKAGE_kmod-usb-net=y
           CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
@@ -113,21 +126,21 @@ jobs:
           CONFIG_PACKAGE_kmod-usb-serial=y
           CONFIG_PACKAGE_usb-modeswitch=y
 
-          # --- 短信功能支持 (ModemManager + smstool) ---
+          # 短信功能（ModemManager + smstool）
           CONFIG_PACKAGE_modemmanager=y
           CONFIG_PACKAGE_luci-proto-modemmanager=y
           CONFIG_PACKAGE_luci-app-sms-tool=y
           EOF
           
-          # 4. 再次defconfig补全所有新依赖
+          # 5. 最终补全依赖
           make defconfig
           
-          # 5. 验证设备配置是否保留
+          # 6. 最终验证
           if grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
-            echo "✅ 设备配置验证通过"
+            echo "✅ 最终配置验证通过"
           else
-            echo "❌ 设备配置丢失，当前设备选项："
-            grep -E 'CONFIG_TARGET_.*DEVICE' .config || echo "无任何设备选项"
+            echo "❌ 配置异常，当前设备选项："
+            grep -E 'CONFIG_TARGET_.*DEVICE' .config || echo "无设备选项"
             exit 1
           fi
 
