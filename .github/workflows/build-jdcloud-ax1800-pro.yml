@@ -1,4 +1,4 @@
-name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（100%成功版）
+name: 京东云亚瑟AX1800 Pro LEDE+iStore编译（istore克隆更新）
 
 on:
   workflow_dispatch:
@@ -59,28 +59,55 @@ jobs:
           fi
           echo "✅ Lean源码克隆成功"
 
-      - name: 手动克隆iStore源（完全绕过feeds自动克隆）
+      - name: 手动克隆iStore源（增强网络容错 + 多源备用）
         working-directory: ./lede
         run: |
           # 清理旧的feeds目录和配置
           rm -rf feeds/ feeds.conf
           mkdir -p feeds/
-          
-          # 手动克隆iStore源到feeds/istore（3次重试）
-          for i in 1 2 3; do
-            echo "第$i次尝试克隆iStore源..."
-            git clone --depth 1 https://github.com/istoreos/istore-packages.git -b main feeds/istore && break
-            rm -rf feeds/istore
-            sleep 10
+
+          # 定义多个已知可用的iStore仓库地址
+          REPO_URLS=(
+            "https://github.com/istoreos/istore.git"
+            "https://github.com/linkease/istore.git"
+            "https://github.com/linkease/istore-packages.git"
+          )
+
+          CLONE_SUCCESS=0
+          for repo in "${REPO_URLS[@]}"; do
+            # 先做连通性测试（超时10秒）
+            echo "🔍 测试连通性: $repo"
+            if git ls-remote --heads "$repo" &>/dev/null; then
+              echo "✅ 仓库可达，开始克隆: $repo"
+            else
+              echo "⚠️ 仓库不可达，尝试下一个..."
+              continue
+            fi
+
+            # 尝试克隆（重试5次，间隔30秒）
+            for i in 1 2 3 4 5; do
+              echo "第${i}次尝试克隆 $repo ..."
+              rm -rf feeds/istore
+              git clone --depth 1 "$repo" -b main feeds/istore && {
+                CLONE_SUCCESS=1
+                break
+              }
+              echo "❌ 克隆失败，等待30秒后重试..."
+              rm -rf feeds/istore
+              sleep 30
+            done
+
+            if [ $CLONE_SUCCESS -eq 1 ]; then
+              echo "✅ iStore源克隆成功 (来自: $repo)"
+              break
+            fi
           done
-          
-          # 强制验证iStore目录存在
-          if [ ! -d "feeds/istore" ]; then
-            echo "❌ iStore源克隆失败"
+
+          if [ $CLONE_SUCCESS -ne 1 ]; then
+            echo "❌ 所有iStore源均克隆失败，请检查网络或仓库地址"
             exit 1
           fi
-          echo "✅ iStore源手动克隆成功"
-          
+
           # 生成feeds.conf，用src-link链接本地iStore目录
           cat > feeds.conf << EOF
           src-git packages https://github.com/coolsnowwolf/packages
@@ -102,7 +129,6 @@ jobs:
           ./scripts/feeds install -a -p istore
           
           # 再单独安装我们需要的所有LuCI应用和内核模块
-          # 逐个安装可以避免因冲突包导致的全局安装失败
           ./scripts/feeds install luci
           ./scripts/feeds install luci-i18n-base-zh-cn
           ./scripts/feeds install luci-theme-argon
