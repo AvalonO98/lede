@@ -68,10 +68,10 @@ jobs:
       - name: 生成京东云AX1800 Pro配置
         working-directory: ./lede
         run: |
-          # 初始 defconfig
+          # 1. 初始 defconfig
           make defconfig 2>&1 | tee defconfig1.log
           
-          # 强制写入设备目标
+          # 2. 强制写入设备目标
           sed -i '/^CONFIG_TARGET_/d' .config
           cat >> .config << EOF
           CONFIG_TARGET_qualcommax=y
@@ -81,7 +81,7 @@ jobs:
           
           make defconfig 2>&1 | tee defconfig2.log
           
-          # 添加需要的软件包
+          # 3. 添加需要的软件包
           cat >> .config << EOF
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_STRIP_KERNEL_EXPORTS=y
@@ -116,11 +116,28 @@ jobs:
           CONFIG_PACKAGE_luci-app-sms-tool=y
           EOF
           
-          # 最终 defconfig 解析依赖
+          # 4. 最终 defconfig 解析依赖
           make defconfig 2>&1 | tee defconfig_final.log
           
-          # ---------- 强制禁用 DRM 子系统 ----------
-          echo "🔧 彻底禁用 DRM 显示驱动（路由器不需要）..."
+          # ---------- 彻底禁用 DRM 内核模块（修改内核配置文件）----------
+          echo "🔧 修改内核配置文件，彻底禁用 DRM ..."
+          KCONFIG=$(ls target/linux/qualcommax/config-* 2>/dev/null | head -1)
+          if [ -n "$KCONFIG" ]; then
+            # 删除可能存在的 DRM 相关配置行
+            sed -i '/^CONFIG_DRM/d' "$KCONFIG"
+            sed -i '/^# CONFIG_DRM/d' "$KCONFIG"
+            # 追加禁用选项
+            cat >> "$KCONFIG" << EOF
+          # CONFIG_DRM is not set
+          # CONFIG_DRM_BRIDGE is not set
+          # CONFIG_DRM_AUX_BRIDGE is not set
+          EOF
+            echo "✅ 已修改 $KCONFIG"
+          else
+            echo "⚠️ 未找到内核配置文件，跳过"
+          fi
+          
+          # 同时在 .config 中也禁用，确保双重保险
           sed -i '/^CONFIG_DRM/d' .config
           sed -i '/^# CONFIG_DRM/d' .config
           cat >> .config << EOF
@@ -128,9 +145,12 @@ jobs:
           # CONFIG_DRM_BRIDGE is not set
           # CONFIG_DRM_AUX_BRIDGE is not set
           EOF
-          # ---------- 结束 ----------
+          # ---------------------------------------------------------------
           
-          # 验证设备配置
+          # 重新生成配置，确保内核配置变更被引入
+          make defconfig 2>&1 | tee defconfig_drm.log
+          
+          # 验证设备配置是否存在
           if grep -q "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "✅ 设备配置验证通过"
           else
@@ -200,13 +220,13 @@ jobs:
           TAG="ax1800pro-${{ github.run_number }}"
           echo "🚀 创建 Release: $TAG"
           
-          # 如果该 tag 已存在（重复运行），先删除它
+          # 如果该 tag 已存在，先删除
           gh release view "$TAG" > /dev/null 2>&1 && {
             echo "⚠️ 已存在同名 Release，正在删除..."
             gh release delete "$TAG" --yes || true
           }
           
-          # 创建新的 Release 并上传固件
+          # 创建新 Release
           gh release create "$TAG" \
             output/* \
             --title "京东云AX1800 Pro LEDE固件 ${{ github.run_number }}" \
